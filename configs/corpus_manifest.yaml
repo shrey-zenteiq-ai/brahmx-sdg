@@ -1,0 +1,22 @@
+# BrahmX SDG — Corpus Assembly Manifest
+# Run: brahmx-sdg corpus assemble --manifest configs/corpus_manifest.yaml --output data/corpus
+
+version: "v0.1"
+notes: "Initial test corpus from gold generation runs"
+
+# Directories containing GOLD-*.json bundles
+gold_paths:
+  - "data/gold"
+
+# Silver bundles (optional)
+silver_paths: []
+
+# Mixture / filter policy (optional — empty = include all)
+mixture:
+  # Restrict to specific slice types (omit to include all 8)
+  task_types: []
+  # Cap per task type (0 = unlimited)
+  max_per_type: 0
+
+# Output format
+format: "jsonl"

@@ -1,0 +1,38 @@
+{
+  "task_id": "TASK-math-001",
+  "section_id": "MATH-C05-M03-S02",
+  "task_type": "gold_explanation",
+  "domain": "linear algebra",
+  "language": "en",
+  "difficulty": "hard",
+  "objectives": [
+    "Define eigenvalues and eigenvectors of a square matrix",
+    "Derive the characteristic equation det(A - λI) = 0",
+    "Compute eigenvalues and eigenvectors for a 2×2 matrix through a worked example",
+    "Explain the geometric interpretation of eigenvectors as invariant directions",
+    "State the spectral theorem for symmetric matrices"
+  ],
+  "required_claims": [
+    {
+      "claim_id": "CFT-MATH-0201",
+      "statement": "A non-zero vector v is an eigenvector of matrix A if Av = λv for some scalar λ (the eigenvalue)"
+    },
+    {
+      "claim_id": "CFT-MATH-0202",
+      "statement": "Eigenvalues are roots of the characteristic polynomial det(A - λI) = 0"
+    },
+    {
+      "claim_id": "CFT-MATH-0203",
+      "statement": "A real symmetric matrix has real eigenvalues and orthogonal eigenvectors"
+    }
+  ],
+  "constraints": {
+    "include_worked_example": true,
+    "include_exercises": 2,
+    "latex_math": true
+  },
+  "metadata": {
+    "curriculum_module": "Eigenvalue Decomposition",
+    "target_student": "undergraduate mathematics / engineering year 2"
+  }
+}

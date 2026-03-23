@@ -1,0 +1,43 @@
+# BrahmX SDG — Gold Gate Configuration
+# SINGLE SOURCE OF TRUTH for acceptance thresholds.
+# Changes require: version bump, CHANGELOG entry, regression test pass.
+
+pipeline_version: "0.1.0"
+
+tiers:
+  gold:
+    description: >
+      Full gold standard. All automated gates + human sign-off.
+      For RLHF, evaluations, and high-stakes fine-tuning.
+    gates:
+      schema_valid: true
+      claim_ledger_present: true
+      objective_coverage: { operator: ">=", value: 0.95 }
+      citation_coverage: { operator: ">=", value: 0.98 }
+      citation_precision: { operator: ">=", value: 0.95 }
+      citation_specificity: { operator: ">=", value: 0.85 }
+      required_claims_present: true
+      tool_checks_pass: { operator: "=", value: 1.00 }
+      safety_compliance: "PASS"
+      auditor_status: "PASS"
+      human_approval: "PASS"
+      semantic_dedup_passed: true
+      eval_contamination_check: "PASS"
+
+  silver:
+    description: >
+      Dean PASS with most automated checks. For fine-tuning and supplementary data.
+    gates:
+      schema_valid: true
+      citation_coverage: { operator: ">=", value: 0.80 }
+      citation_precision: { operator: ">=", value: 0.80 }
+      objective_coverage: { operator: ">=", value: 0.80 }
+      safety_compliance: "PASS"
+      auditor_status: "PASS"
+
+  bronze:
+    description: >
+      Schema valid with basic checks. For pretraining quantity signal.
+    gates:
+      schema_valid: true
+      safety_compliance: "PASS"

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python3 -m pip install -e \"/home/tripathi/brahmx-sdg-platform[dev]\" --break-system-packages -q)",
+      "Bash(python3 -c \"import brahmx_sdg; print\\(''''import OK''''\\)\")",
+      "Bash(python3 -m brahmx_sdg.cli --help)"
+    ]
+  }
+}

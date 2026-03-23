@@ -1,0 +1,32 @@
+{
+  "task_id": "TASK-bio-001",
+  "section_id": "BIO-C02-M01-S03",
+  "task_type": "gold_qa",
+  "domain": "cell biology",
+  "language": "en",
+  "difficulty": "medium",
+  "objectives": [
+    "Describe the stages of mitosis: prophase, metaphase, anaphase, telophase",
+    "Explain the role of the spindle apparatus in chromosome segregation",
+    "Distinguish mitosis from meiosis in terms of purpose and outcome",
+    "Identify checkpoints in the cell cycle and their significance"
+  ],
+  "required_claims": [
+    {
+      "claim_id": "CFT-BIO-0101",
+      "statement": "Mitosis produces two genetically identical diploid daughter cells"
+    },
+    {
+      "claim_id": "CFT-BIO-0102",
+      "statement": "The spindle apparatus is composed of microtubules that attach to kinetochores on chromosomes"
+    }
+  ],
+  "constraints": {
+    "include_exercises": 3,
+    "include_diagram_description": true
+  },
+  "metadata": {
+    "curriculum_module": "Cell Division",
+    "target_student": "undergraduate biology year 1"
+  }
+}

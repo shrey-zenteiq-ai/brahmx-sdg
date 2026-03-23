@@ -1,0 +1,111 @@
+# BrahmX SDG — Model Routing Configuration
+# OpenAI API placeholder — swap base_url + api_key_env when TPU vLLM is ready.
+#
+# To use:  export OPENAI_API_KEY=sk-...
+# Each entry that sets api_key_env will read that env var at runtime.
+
+models:
+  # ── Teacher A: bulk evidence-grounded generation ──────────────────────────
+  - model_id: "openai-teacher-a"
+    model_name: "gpt-4o-mini"
+    runtime: "vllm_gpu"          # treated as generic OpenAI-compat cloud endpoint
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+    roles: ["teacher_a", "structured_json"]
+    workload_classes: ["bulk"]
+    max_context_length: 128000
+    validated_on_tpu: false
+    cost_per_1k_tokens: 0.00015
+    avg_latency_ms: 800
+    quality_score: 0.82
+    temperature: 0.7
+    enabled: true
+
+  # ── Teacher B: difficult / frontier science ───────────────────────────────
+  - model_id: "openai-teacher-b"
+    model_name: "gpt-4o"
+    runtime: "vllm_gpu"
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+    roles: ["teacher_b", "latex_code"]
+    workload_classes: ["bulk", "frontier"]
+    max_context_length: 128000
+    validated_on_tpu: false
+    cost_per_1k_tokens: 0.0025
+    avg_latency_ms: 1500
+    quality_score: 0.95
+    temperature: 0.8
+    enabled: true
+
+  # ── Teacher C: independent alternate-lineage perspective ─────────────────
+  - model_id: "openai-teacher-c"
+    model_name: "gpt-4o-mini"
+    runtime: "vllm_gpu"
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+    roles: ["teacher_c", "conversation"]
+    workload_classes: ["bulk", "audit"]
+    max_context_length: 128000
+    validated_on_tpu: false
+    cost_per_1k_tokens: 0.00015
+    avg_latency_ms: 900
+    quality_score: 0.82
+    temperature: 0.9
+    enabled: true
+
+  # ── Dean: structured verification / scoring ───────────────────────────────
+  - model_id: "openai-dean"
+    model_name: "gpt-4o-mini"
+    runtime: "vllm_gpu"
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+    roles: ["dean"]
+    workload_classes: ["bulk"]
+    max_context_length: 128000
+    validated_on_tpu: false
+    cost_per_1k_tokens: 0.00015
+    avg_latency_ms: 600
+    quality_score: 0.85
+    temperature: 0.1
+    enabled: true
+
+  # ── Auditor: independent adversarial review ───────────────────────────────
+  - model_id: "openai-auditor"
+    model_name: "gpt-4o-mini"
+    runtime: "vllm_gpu"
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+    roles: ["auditor"]
+    workload_classes: ["audit"]
+    max_context_length: 128000
+    validated_on_tpu: false
+    cost_per_1k_tokens: 0.00015
+    avg_latency_ms: 700
+    quality_score: 0.83
+    temperature: 0.2
+    enabled: true
+
+# ── Routing defaults ──────────────────────────────────────────────────────────
+routing:
+  default_workload: "bulk"
+  fallback_enabled: true
+  max_fallback_attempts: 2
+  admission_control:
+    bulk_concurrency: 16
+    frontier_concurrency: 4
+    audit_concurrency: 4
+
+# ── TPU vLLM template (uncomment when pods are ready) ────────────────────────
+# Replace the OpenAI entries above with these when TPU vLLM is available.
+#
+# - model_id: "llama4-scout-teacher-a"
+#   model_name: "meta-llama/Llama-4-Scout"
+#   runtime: "vllm_tpu"
+#   base_url: "http://pod0-vllm:8000"
+#   api_key_env: ""
+#   roles: ["teacher_a"]
+#   workload_classes: ["bulk"]
+#   max_context_length: 10000000
+#   validated_on_tpu: true
+#   temperature: 0.7
+#   enabled: true

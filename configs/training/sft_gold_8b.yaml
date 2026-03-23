@@ -1,0 +1,38 @@
+# BrahmX SDG — Training Run Spec: Gold-Heavy SFT (8B Student)
+# MaxText on TPU v5e-256
+
+run_id: "sft-gold-8b-v1"
+stage: "sft_gold"
+student_model: "brahmx-sci-8b"
+corpus_version: "gs://brahmx-corpora/v1.0/sft_gold/"
+release_manifest_id: "REL-v1.0"
+
+hyperparameters:
+  learning_rate: 2.0e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  batch_size: 256
+  gradient_accumulation_steps: 4
+  max_seq_length: 8192
+  dtype: "bfloat16"
+
+maxtext_config:
+  run_name: "brahmx-sft-gold-8b"
+  model_name: "default"
+  max_target_length: 8192
+  per_device_batch_size: 4
+  ici_fsdp_parallelism: 16
+  ici_tensor_parallelism: 1
+  steps: 10000
+  learning_rate: 2.0e-5
+  enable_checkpointing: true
+  checkpoint_period: 1000
+  dataset_type: "array_record"
+  dataset_path: "gs://brahmx-corpora/v1.0/sft_gold/"
+  base_output_directory: "gs://brahmx-checkpoints/sft-gold-8b/"
+
+tpu_topology: "v5e-256"
+num_steps: 10000
+checkpoint_interval: 1000
+eval_interval: 500
+base_checkpoint: "gs://brahmx-checkpoints/cpt-8b/step_50000/"

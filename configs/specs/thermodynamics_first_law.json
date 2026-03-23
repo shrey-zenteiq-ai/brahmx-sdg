@@ -1,0 +1,38 @@
+{
+  "task_id": "TASK-thermo-001",
+  "section_id": "PHYS-C03-M02-S04",
+  "task_type": "gold_explanation",
+  "domain": "thermodynamics",
+  "language": "en",
+  "difficulty": "medium",
+  "objectives": [
+    "Explain the First Law of Thermodynamics in terms of internal energy, heat, and work",
+    "Derive the mathematical statement ΔU = Q - W and explain each term",
+    "Distinguish between heat and temperature at the molecular level",
+    "Apply the First Law to an ideal gas undergoing isothermal and adiabatic processes",
+    "Describe the sign convention for Q and W in the physics and chemistry conventions"
+  ],
+  "required_claims": [
+    {
+      "claim_id": "CFT-PHYS-0042",
+      "statement": "The First Law of Thermodynamics states that energy is conserved: ΔU = Q - W"
+    },
+    {
+      "claim_id": "CFT-PHYS-0043",
+      "statement": "Internal energy U is a state function; Q and W are path-dependent"
+    },
+    {
+      "claim_id": "CFT-PHYS-0044",
+      "statement": "For an ideal gas, internal energy depends only on temperature"
+    }
+  ],
+  "constraints": {
+    "max_word_count": 1200,
+    "include_worked_example": true,
+    "include_exercises": 2
+  },
+  "metadata": {
+    "curriculum_module": "Classical Thermodynamics",
+    "target_student": "undergraduate physics / engineering year 1"
+  }
+}
