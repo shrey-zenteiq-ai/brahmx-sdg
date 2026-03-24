@@ -1,0 +1,498 @@
+# PIPELINE DEFINITION
+# Name: brahmx-sdg-gold-generation
+# Description: BrahmX SDG: ingest → 3-teacher gold generation → Dean/Auditor → JSONL corpus assembly → human review queue
+# Inputs:
+#    corpus_gcs_prefix: str
+#    corpus_version: str [Default: 'v0.1']
+#    gold_gcs_prefix: str
+#    kb_gcs_prefix: str
+#    no_llm_dean: bool [Default: False]
+#    openai_secret_id: str [Default: 'openai-api-key']
+#    project_id: str
+#    routing_config_gcs_uri: str
+#    spec_gcs_uris: list
+components:
+  comp-assemble-corpus:
+    executorLabel: exec-assemble-corpus
+    inputDefinitions:
+      parameters:
+        corpus_version:
+          defaultValue: v0.1
+          description: '    Version tag embedded in the assembly result.'
+          isOptional: true
+          parameterType: STRING
+        gold_gcs_prefix:
+          description: '   gs:// prefix where GOLD-*.json files live.'
+          parameterType: STRING
+        output_gcs_prefix:
+          description: ' gs:// prefix where JSONL files will be written.'
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-for-loop-1:
+    dag:
+      tasks:
+        generate-gold-bundle:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-generate-gold-bundle
+          inputs:
+            parameters:
+              gold_gcs_prefix:
+                componentInputParameter: pipelinechannel--gold_gcs_prefix
+              kb_gcs_prefix:
+                componentInputParameter: pipelinechannel--kb_gcs_prefix
+              no_llm_dean:
+                componentInputParameter: pipelinechannel--no_llm_dean
+              openai_secret_id:
+                componentInputParameter: pipelinechannel--openai_secret_id
+              project_id:
+                componentInputParameter: pipelinechannel--project_id
+              routing_config_gcs_uri:
+                componentInputParameter: pipelinechannel--routing_config_gcs_uri
+              spec_gcs_uri:
+                componentInputParameter: pipelinechannel--spec_gcs_uris-loop-item
+          taskInfo:
+            name: generate-gold-bundle
+        write-to-human-review-queue:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-write-to-human-review-queue
+          dependentTasks:
+          - generate-gold-bundle
+          inputs:
+            parameters:
+              generation_result_json:
+                taskOutputParameter:
+                  outputParameterKey: Output
+                  producerTask: generate-gold-bundle
+              gold_gcs_prefix:
+                componentInputParameter: pipelinechannel--gold_gcs_prefix
+              project_id:
+                componentInputParameter: pipelinechannel--project_id
+          taskInfo:
+            name: write-to-human-review-queue
+    inputDefinitions:
+      parameters:
+        pipelinechannel--gold_gcs_prefix:
+          parameterType: STRING
+        pipelinechannel--kb_gcs_prefix:
+          parameterType: STRING
+        pipelinechannel--no_llm_dean:
+          parameterType: BOOLEAN
+        pipelinechannel--openai_secret_id:
+          parameterType: STRING
+        pipelinechannel--project_id:
+          parameterType: STRING
+        pipelinechannel--routing_config_gcs_uri:
+          parameterType: STRING
+        pipelinechannel--spec_gcs_uris:
+          parameterType: LIST
+        pipelinechannel--spec_gcs_uris-loop-item:
+          parameterType: STRING
+  comp-generate-gold-bundle:
+    executorLabel: exec-generate-gold-bundle
+    inputDefinitions:
+      parameters:
+        gold_gcs_prefix:
+          description: '       gs:// prefix where bundles will be written.'
+          parameterType: STRING
+        kb_gcs_prefix:
+          description: '         gs:// prefix of the knowledge base chunks dir.'
+          parameterType: STRING
+        no_llm_dean:
+          defaultValue: false
+          description: '           If True, skips LLM rubric scoring in Dean.'
+          isOptional: true
+          parameterType: BOOLEAN
+        openai_secret_id:
+          defaultValue: openai-api-key
+          description: '      Secret Manager secret name holding OPENAI_API_KEY.'
+          isOptional: true
+          parameterType: STRING
+        project_id:
+          description: '            GCP project ID (used for Secret Manager).'
+          parameterType: STRING
+        routing_config_gcs_uri:
+          description: gs:// URI of configs/routing/models.yaml.
+          parameterType: STRING
+        spec_gcs_uri:
+          description: '          gs:// URI of the task spec JSON file.'
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-write-to-human-review-queue:
+    executorLabel: exec-write-to-human-review-queue
+    inputDefinitions:
+      parameters:
+        generation_result_json:
+          description: ' Output JSON string from generate_gold_bundle.'
+          parameterType: STRING
+        gold_gcs_prefix:
+          description: '        gs:// prefix where GOLD-*.json files live.'
+          parameterType: STRING
+        project_id:
+          description: '             GCP project ID.'
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-assemble-corpus:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - assemble_corpus
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef assemble_corpus(\n    gold_gcs_prefix: str,\n    output_gcs_prefix:\
+          \ str,\n    corpus_version: str = \"v0.1\",\n) -> str:\n    \"\"\"\n   \
+          \ Download all GOLD-*.json bundles from GCS, assemble them into JSONL corpus\n\
+          \    files (one per slice type + all_slices.jsonl), and upload to GCS.\n\
+          \n    Slice subdirectory is intentionally excluded from download \u2014\
+          \ the\n    CorpusAssembler re-emits slices from each bundle's content directly.\n\
+          \n    Args:\n        gold_gcs_prefix:    gs:// prefix where GOLD-*.json\
+          \ files live.\n        output_gcs_prefix:  gs:// prefix where JSONL files\
+          \ will be written.\n        corpus_version:     Version tag embedded in\
+          \ the assembly result.\n\n    Returns:\n        JSON string: {version, total_examples,\
+          \ slices_by_type, output_gcs_prefix}.\n    \"\"\"\n    import json\n   \
+          \ import tempfile\n    from pathlib import Path\n    from google.cloud import\
+          \ storage\n    import yaml\n\n    # \u2500\u2500 inline GCS helpers \u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\n    def _parse_gcs_uri(uri):\n        assert uri.startswith(\"\
+          gs://\"), f\"Expected gs:// URI, got: {uri}\"\n        parts = uri[5:].split(\"\
+          /\", 1)\n        return parts[0], (parts[1] if len(parts) > 1 else \"\"\
+          )\n\n    def _gcs_download_gold_bundles(client, bucket_name, prefix, local_dir):\n\
+          \        \"\"\"Download only top-level GOLD-*.json files (skip slices/ subdir).\"\
+          \"\"\n        from pathlib import Path\n        bucket = client.bucket(bucket_name)\n\
+          \        for blob in bucket.list_blobs(prefix=prefix):\n            rel\
+          \ = blob.name[len(prefix):].lstrip(\"/\")\n            if not rel or \"\
+          /\" in rel:\n                # Skip empty prefix match and subdirectory\
+          \ entries (slices/)\n                continue\n            if not rel.startswith(\"\
+          GOLD-\") or not rel.endswith(\".json\"):\n                continue\n   \
+          \         dest = Path(local_dir) / rel\n            dest.parent.mkdir(parents=True,\
+          \ exist_ok=True)\n            blob.download_to_filename(str(dest))\n\n \
+          \   def _gcs_upload_dir(client, local_dir, bucket_name, prefix):\n     \
+          \   for f in Path(local_dir).rglob(\"*\"):\n            if f.is_file():\n\
+          \                rel = f.relative_to(local_dir)\n                blob_name\
+          \ = f\"{prefix.rstrip('/')}/{rel}\"\n                client.bucket(bucket_name).blob(blob_name).upload_from_filename(str(f))\n\
+          \n    gcs = storage.Client()\n\n    with tempfile.TemporaryDirectory() as\
+          \ tmp:\n        tmp = Path(tmp)\n        local_gold = tmp / \"gold\"\n \
+          \       local_gold.mkdir()\n        local_corpus = tmp / \"corpus\"\n  \
+          \      local_corpus.mkdir()\n\n        # Download gold bundles\n       \
+          \ gold_bucket, gold_prefix = _parse_gcs_uri(gold_gcs_prefix)\n        _gcs_download_gold_bundles(gcs,\
+          \ gold_bucket, gold_prefix, str(local_gold))\n\n        bundle_count = len(list(local_gold.glob(\"\
+          GOLD-*.json\")))\n        if bundle_count == 0:\n            return json.dumps({\n\
+          \                \"version\": corpus_version,\n                \"total_examples\"\
+          : 0,\n                \"slices_by_type\": {},\n                \"output_gcs_prefix\"\
+          : output_gcs_prefix,\n                \"warning\": \"No GOLD-*.json files\
+          \ found at the given prefix.\",\n            })\n\n        # Write a minimal\
+          \ manifest so CorpusAssembler can find the bundles\n        manifest_data\
+          \ = {\n            \"version\": corpus_version,\n            \"gold_paths\"\
+          : [str(local_gold)],\n            \"silver_paths\": [],\n            \"\
+          mixture\": {\"task_types\": [], \"max_per_type\": 0},\n            \"format\"\
+          : \"jsonl\",\n        }\n        manifest_path = tmp / \"manifest.yaml\"\
+          \n        manifest_path.write_text(yaml.dump(manifest_data))\n\n       \
+          \ # Assemble\n        from brahmx_sdg.corpus.corpus_assembler import CorpusAssembler\n\
+          \n        assembler = CorpusAssembler()\n        result = assembler.run(manifest_path=manifest_path,\
+          \ output_path=local_corpus)\n\n        # Upload JSONL files\n        out_bucket,\
+          \ out_prefix = _parse_gcs_uri(output_gcs_prefix)\n        _gcs_upload_dir(gcs,\
+          \ str(local_corpus), out_bucket, out_prefix)\n\n        return json.dumps({\n\
+          \            \"version\": result.version,\n            \"total_examples\"\
+          : result.total_examples,\n            \"slices_by_type\": result.slices_by_type,\n\
+          \            \"output_gcs_prefix\": output_gcs_prefix,\n        })\n\n"
+        image: asia-south1-docker.pkg.dev/zenteiq-lxp-1722918338008/brahmx-sdg/sdg:latest
+    exec-generate-gold-bundle:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - generate_gold_bundle
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef generate_gold_bundle(\n    project_id: str,\n    spec_gcs_uri:\
+          \ str,\n    kb_gcs_prefix: str,\n    gold_gcs_prefix: str,\n    routing_config_gcs_uri:\
+          \ str,\n    openai_secret_id: str = \"openai-api-key\",\n    no_llm_dean:\
+          \ bool = False,\n) -> str:\n    \"\"\"\n    Download a task spec + KB chunks\
+          \ from GCS, run the full gold generation\n    pipeline, and upload the resulting\
+          \ GOLD bundle + slice files to GCS.\n\n    The OpenAI API key is fetched\
+          \ from Secret Manager (never logged).\n\n    Args:\n        project_id:\
+          \             GCP project ID (used for Secret Manager).\n        spec_gcs_uri:\
+          \           gs:// URI of the task spec JSON file.\n        kb_gcs_prefix:\
+          \          gs:// prefix of the knowledge base chunks dir.\n        gold_gcs_prefix:\
+          \        gs:// prefix where bundles will be written.\n        routing_config_gcs_uri:\
+          \ gs:// URI of configs/routing/models.yaml.\n        openai_secret_id: \
+          \      Secret Manager secret name holding OPENAI_API_KEY.\n        no_llm_dean:\
+          \            If True, skips LLM rubric scoring in Dean.\n\n    Returns:\n\
+          \        JSON string: {success, bundle_id, reason, spec_gcs_uri,\n     \
+          \                 bundle_gcs_uri, slices_gcs_prefix}.\n    \"\"\"\n    import\
+          \ json\n    import os\n    import tempfile\n    from pathlib import Path\n\
+          \    from google.cloud import secretmanager, storage\n\n    # \u2500\u2500\
+          \ inline GCS helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    def _parse_gcs_uri(uri):\n\
+          \        assert uri.startswith(\"gs://\"), f\"Expected gs:// URI, got: {uri}\"\
+          \n        parts = uri[5:].split(\"/\", 1)\n        return parts[0], (parts[1]\
+          \ if len(parts) > 1 else \"\")\n\n    def _gcs_download_file(client, bucket_name,\
+          \ blob_name, local_path):\n        Path(local_path).parent.mkdir(parents=True,\
+          \ exist_ok=True)\n        client.bucket(bucket_name).blob(blob_name).download_to_filename(local_path)\n\
+          \n    def _gcs_download_prefix(client, bucket_name, prefix, local_dir):\n\
+          \        bucket = client.bucket(bucket_name)\n        for blob in bucket.list_blobs(prefix=prefix):\n\
+          \            rel = blob.name[len(prefix):].lstrip(\"/\")\n            if\
+          \ not rel:\n                continue\n            dest = Path(local_dir)\
+          \ / rel\n            dest.parent.mkdir(parents=True, exist_ok=True)\n  \
+          \          blob.download_to_filename(str(dest))\n\n    def _gcs_upload_file(client,\
+          \ local_path, bucket_name, blob_name):\n        client.bucket(bucket_name).blob(blob_name).upload_from_filename(local_path)\n\
+          \n    def _gcs_upload_dir(client, local_dir, bucket_name, prefix):\n   \
+          \     for f in Path(local_dir).rglob(\"*\"):\n            if f.is_file():\n\
+          \                rel = f.relative_to(local_dir)\n                blob_name\
+          \ = f\"{prefix.rstrip('/')}/{rel}\"\n                client.bucket(bucket_name).blob(blob_name).upload_from_filename(str(f))\n\
+          \n    # \u2500\u2500 fetch secret \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\n    sm = secretmanager.SecretManagerServiceClient()\n\
+          \    secret_name = f\"projects/{project_id}/secrets/{openai_secret_id}/versions/latest\"\
+          \n    api_key = sm.access_secret_version(request={\"name\": secret_name}).payload.data.decode()\n\
+          \    os.environ[\"OPENAI_API_KEY\"] = api_key\n\n    gcs = storage.Client()\n\
+          \n    with tempfile.TemporaryDirectory() as tmp:\n        tmp = Path(tmp)\n\
+          \n        # Download task spec\n        spec_bucket, spec_blob = _parse_gcs_uri(spec_gcs_uri)\n\
+          \        local_spec = tmp / \"spec.json\"\n        _gcs_download_file(gcs,\
+          \ spec_bucket, spec_blob, str(local_spec))\n\n        # Download KB chunks\n\
+          \        kb_bucket, kb_prefix = _parse_gcs_uri(kb_gcs_prefix)\n        local_kb\
+          \ = tmp / \"kb\"\n        local_kb.mkdir()\n        _gcs_download_prefix(gcs,\
+          \ kb_bucket, kb_prefix, str(local_kb))\n\n        # Download routing config\n\
+          \        rc_bucket, rc_blob = _parse_gcs_uri(routing_config_gcs_uri)\n \
+          \       local_rc = tmp / \"models.yaml\"\n        _gcs_download_file(gcs,\
+          \ rc_bucket, rc_blob, str(local_rc))\n\n        # Output dir\n        local_gold\
+          \ = tmp / \"gold\"\n        local_gold.mkdir()\n\n        # Run gold generation\n\
+          \        from brahmx_sdg.generation.gold_generator import GoldGenerator\n\
+          \n        generator = GoldGenerator(routing_config=str(local_rc))\n    \
+          \    if no_llm_dean:\n            from brahmx_sdg.verification.dean import\
+          \ Dean\n            generator._dean = Dean(routing_config=str(local_rc),\
+          \ use_llm_scoring=False)\n\n        result = generator.run(\n          \
+          \  spec_path=local_spec,\n            kb_path=local_kb,\n            output_dir=local_gold,\n\
+          \        )\n\n        gold_bucket, gold_prefix = _parse_gcs_uri(gold_gcs_prefix)\n\
+          \n        if result.success:\n            # Upload GOLD-*.json bundle file\n\
+          \            for f in local_gold.glob(\"GOLD-*.json\"):\n              \
+          \  _gcs_upload_file(\n                    gcs, str(f),\n               \
+          \     gold_bucket,\n                    f\"{gold_prefix.rstrip('/')}/{f.name}\"\
+          ,\n                )\n\n            # Upload slice files\n            slices_dir\
+          \ = local_gold / \"slices\"\n            if slices_dir.exists():\n     \
+          \           _gcs_upload_dir(\n                    gcs, str(slices_dir),\n\
+          \                    gold_bucket,\n                    f\"{gold_prefix.rstrip('/')}/slices\"\
+          ,\n                )\n\n        bundle_gcs_uri = (\n            f\"{gold_gcs_prefix.rstrip('/')}/{result.bundle_id}.json\"\
+          \n            if result.success else \"\"\n        )\n        slices_gcs_prefix\
+          \ = (\n            f\"{gold_gcs_prefix.rstrip('/')}/slices/\"\n        \
+          \    if result.success else \"\"\n        )\n\n        return json.dumps({\n\
+          \            \"success\": result.success,\n            \"bundle_id\": result.bundle_id\
+          \ if result.success else \"\",\n            \"reason\": result.reason if\
+          \ not result.success else \"\",\n            \"spec_gcs_uri\": spec_gcs_uri,\n\
+          \            \"bundle_gcs_uri\": bundle_gcs_uri,\n            \"slices_gcs_prefix\"\
+          : slices_gcs_prefix,\n        })\n\n"
+        image: asia-south1-docker.pkg.dev/zenteiq-lxp-1722918338008/brahmx-sdg/sdg:latest
+    exec-write-to-human-review-queue:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - write_to_human_review_queue
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef write_to_human_review_queue(\n    project_id: str,\n    generation_result_json:\
+          \ str,\n    gold_gcs_prefix: str,\n) -> str:\n    \"\"\"\n    Read the result\
+          \ from generate_gold_bundle. If it succeeded, download the\n    bundle from\
+          \ GCS and write a review record to Firestore.\n\n    Skips silently for\
+          \ failed bundles (audit FAIL or generation error) so the\n    pipeline does\
+          \ not break on individual spec failures.\n\n    Args:\n        project_id:\
+          \              GCP project ID.\n        generation_result_json:  Output\
+          \ JSON string from generate_gold_bundle.\n        gold_gcs_prefix:     \
+          \    gs:// prefix where GOLD-*.json files live.\n\n    Returns:\n      \
+          \  JSON string: {status, record_id, bundle_id} or {status, reason}.\n  \
+          \  \"\"\"\n    import json\n    import uuid\n    import datetime\n    from\
+          \ google.cloud import firestore, storage\n\n    def _parse_gcs_uri(uri):\n\
+          \        assert uri.startswith(\"gs://\"), f\"Expected gs:// URI, got: {uri}\"\
+          \n        parts = uri[5:].split(\"/\", 1)\n        return parts[0], (parts[1]\
+          \ if len(parts) > 1 else \"\")\n\n    # Parse upstream result\n    try:\n\
+          \        gen_result = json.loads(generation_result_json)\n    except json.JSONDecodeError:\n\
+          \        return json.dumps({\"status\": \"ERROR\", \"reason\": \"Could not\
+          \ parse generation_result_json.\"})\n\n    if not gen_result.get(\"success\"\
+          ):\n        return json.dumps({\n            \"status\": \"SKIPPED\",\n\
+          \            \"reason\": gen_result.get(\"reason\", \"Generation failed.\"\
+          ),\n            \"spec_gcs_uri\": gen_result.get(\"spec_gcs_uri\", \"\"\
+          ),\n        })\n\n    bundle_id = gen_result[\"bundle_id\"]\n    bundle_gcs_uri\
+          \ = gen_result[\"bundle_gcs_uri\"]\n\n    # Download the bundle to read\
+          \ its auditor status\n    gcs = storage.Client()\n    try:\n        bucket_name,\
+          \ blob_name = _parse_gcs_uri(bundle_gcs_uri)\n        bundle_text = gcs.bucket(bucket_name).blob(blob_name).download_as_text()\n\
+          \        bundle_data = json.loads(bundle_text)\n    except Exception as\
+          \ exc:\n        return json.dumps({\"status\": \"ERROR\", \"reason\": f\"\
+          Could not download bundle: {exc}\"})\n\n    auditor_status = bundle_data.get(\"\
+          auditor_report\", {}).get(\"status\", \"UNKNOWN\")\n    escalate = bundle_data.get(\"\
+          auditor_report\", {}).get(\"escalate_to_human\", False)\n\n    # Only queue\
+          \ bundles that passed (or that the Auditor flagged for escalation)\n   \
+          \ if auditor_status != \"PASS\" and not escalate:\n        return json.dumps({\n\
+          \            \"status\": \"SKIPPED\",\n            \"reason\": f\"Auditor\
+          \ status {auditor_status} \u2014 not queued.\",\n            \"bundle_id\"\
+          : bundle_id,\n        })\n\n    # Write to Firestore\n    db = firestore.Client(project=project_id)\n\
+          \    record_id = str(uuid.uuid4())\n\n    doc_data = {\n        \"record_id\"\
+          : record_id,\n        \"bundle_id\": bundle_id,\n        \"status\": \"\
+          PENDING_REVIEW\",\n        \"created_at\": datetime.datetime.utcnow().isoformat()\
+          \ + \"Z\",\n        \"bundle_gcs_uri\": bundle_gcs_uri,\n        \"slices_gcs_prefix\"\
+          : gen_result.get(\"slices_gcs_prefix\", \"\"),\n        \"spec_gcs_uri\"\
+          : gen_result.get(\"spec_gcs_uri\", \"\"),\n        \"auditor_status\": auditor_status,\n\
+          \        \"escalate_to_human\": escalate,\n        \"domain\": bundle_data.get(\"\
+          task_spec\", {}).get(\"domain\", \"\"),\n        \"section_id\": bundle_data.get(\"\
+          task_spec\", {}).get(\"section_id\", \"\"),\n        \"selected_candidate_id\"\
+          : bundle_data.get(\"selected_candidate_id\", \"\"),\n    }\n\n    try:\n\
+          \        db.collection(\"human_review_queue\").document(record_id).set(doc_data)\n\
+          \    except Exception as exc:\n        return json.dumps({\"status\": \"\
+          ERROR\", \"reason\": f\"Firestore write failed: {exc}\"})\n\n    return\
+          \ json.dumps({\n        \"status\": \"SUCCESS\",\n        \"record_id\"\
+          : record_id,\n        \"bundle_id\": bundle_id,\n    })\n\n"
+        image: asia-south1-docker.pkg.dev/zenteiq-lxp-1722918338008/brahmx-sdg/sdg:latest
+pipelineInfo:
+  description: "BrahmX SDG: ingest \u2192 3-teacher gold generation \u2192 Dean/Auditor\
+    \ \u2192 JSONL corpus assembly \u2192 human review queue"
+  name: brahmx-sdg-gold-generation
+root:
+  dag:
+    tasks:
+      assemble-corpus:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-assemble-corpus
+        inputs:
+          parameters:
+            corpus_version:
+              componentInputParameter: corpus_version
+            gold_gcs_prefix:
+              componentInputParameter: gold_gcs_prefix
+            output_gcs_prefix:
+              componentInputParameter: corpus_gcs_prefix
+        taskInfo:
+          name: assemble-corpus
+      for-loop-1:
+        componentRef:
+          name: comp-for-loop-1
+        inputs:
+          parameters:
+            pipelinechannel--gold_gcs_prefix:
+              componentInputParameter: gold_gcs_prefix
+            pipelinechannel--kb_gcs_prefix:
+              componentInputParameter: kb_gcs_prefix
+            pipelinechannel--no_llm_dean:
+              componentInputParameter: no_llm_dean
+            pipelinechannel--openai_secret_id:
+              componentInputParameter: openai_secret_id
+            pipelinechannel--project_id:
+              componentInputParameter: project_id
+            pipelinechannel--routing_config_gcs_uri:
+              componentInputParameter: routing_config_gcs_uri
+            pipelinechannel--spec_gcs_uris:
+              componentInputParameter: spec_gcs_uris
+        iteratorPolicy:
+          parallelismLimit: 4
+        parameterIterator:
+          itemInput: pipelinechannel--spec_gcs_uris-loop-item
+          items:
+            inputParameter: pipelinechannel--spec_gcs_uris
+        taskInfo:
+          name: for-loop-1
+  inputDefinitions:
+    parameters:
+      corpus_gcs_prefix:
+        parameterType: STRING
+      corpus_version:
+        defaultValue: v0.1
+        isOptional: true
+        parameterType: STRING
+      gold_gcs_prefix:
+        parameterType: STRING
+      kb_gcs_prefix:
+        parameterType: STRING
+      no_llm_dean:
+        defaultValue: false
+        isOptional: true
+        parameterType: BOOLEAN
+      openai_secret_id:
+        defaultValue: openai-api-key
+        isOptional: true
+        parameterType: STRING
+      project_id:
+        parameterType: STRING
+      routing_config_gcs_uri:
+        parameterType: STRING
+      spec_gcs_uris:
+        parameterType: LIST
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0

@@ -1,0 +1,12 @@
+# Dependencies needed on the HOST machine to compile and submit the pipeline.
+# These do NOT go inside the Docker image — they're for your local dev environment.
+#
+# Install with:
+#   pip install -r pipelines/vertex/requirements.txt --break-system-packages
+
+kfp==2.16.0
+google-cloud-aiplatform>=1.50
+google-cloud-pipeline-components>=2.14
+python-dotenv>=1.0
+pyOpenSSL>=24.0
+google-auth[mutual-tls]>=2.29

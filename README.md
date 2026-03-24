@@ -35,6 +35,19 @@ pods are ready the swap is a single file edit (`configs/routing/models.yaml`).
 11. [Switching to TPU vLLM](#switching-to-tpu-vllm)
 12. [API Cost Guide](#api-cost-guide)
 13. [Architecture Principles](#architecture-principles)
+14. [Running on Vertex AI Pipelines](#running-on-vertex-ai-pipelines)
+    - [How it fits together](#how-it-fits-together)
+    - [Vertex Pipeline DAG](#vertex-pipeline-dag)
+    - [Prerequisites](#prerequisites)
+    - [Step 1 — GCP Setup](#step-1--gcp-setup-iam-apis-bucket-secrets)
+    - [Step 2 — Build and Push the Component Image](#step-2--build-and-push-the-component-image)
+    - [Step 3 — Upload Assets to GCS](#step-3--upload-assets-to-gcs)
+    - [Step 4 — Set Environment Variables](#step-4--set-environment-variables)
+    - [Step 5 — Compile the Pipeline](#step-5--compile-the-pipeline)
+    - [Step 6 — Submit to Vertex AI](#step-6--submit-to-vertex-ai)
+    - [Pipeline Parameters Reference](#pipeline-parameters-reference)
+    - [Monitoring](#monitoring)
+    - [Common Errors](#common-errors)
 
 ---
 
@@ -62,6 +75,17 @@ brahmx-sdg-platform/
 │   │   └── slices/                    # Individual training slice JSON files
 │   └── corpus/
 │       └── v0.1/                      # Assembled JSONL corpus
+├── pipelines/
+│   └── vertex/
+│       ├── Dockerfile                 # Component image (brahmx_sdg pre-installed)
+│       ├── components.py              # KFP component definitions (GCS I/O wrappers)
+│       ├── pipeline.py                # Pipeline DAG + compile + submit
+│       ├── requirements.txt           # Host-side deps (kfp, google-cloud-aiplatform)
+│       ├── setup_iam.sh               # GCP IAM + API enablement script
+│       ├── build_and_push.sh          # Build + push Docker image to Artifact Registry
+│       └── .env.example               # Vertex-specific environment variables
+├── scripts/
+│   └── upload_to_gcs.sh              # Upload specs / KB / configs to GCS
 └── src/brahmx_sdg/
     ├── ingestion/                     # Source document ingestion
     ├── kb/                            # Knowledge base retrieval (BM25)
@@ -1002,6 +1026,391 @@ development and enable LLM scoring for final gold production runs.
 | **Single swap point** | `configs/routing/models.yaml` is the only file that changes when switching inference backends |
 | **Trust over scale** | Claim ledgers, citation checks, symbolic validation, and dean scoring are mandatory — not optional quality checks |
 | **Two-plane separation** | Data Factory (this repo) exchanges only versioned artifacts with the Model Factory. Training never depends on live teacher inference |
+
+---
+
+## Running on Vertex AI Pipelines
+
+This section covers running the full pipeline on **Google Cloud Vertex AI Pipelines** — the
+managed, serverless KFP execution environment. Each pipeline stage runs in its own container,
+scales automatically, and writes all intermediate data to GCS.
+
+### How it fits together
+
+```
+Your laptop / CI
+  │
+  ├── 1. Build Docker image (brahmx_sdg pre-installed) → push to Artifact Registry
+  ├── 2. Upload specs + KB chunks + routing config → GCS bucket
+  ├── 3. Store OPENAI_API_KEY → Secret Manager
+  ├── 4. python pipelines/vertex/pipeline.py        → compiles YAML + submits job
+  │
+  └── Vertex AI Pipelines runs the DAG:
+        [ParallelFor over spec_gcs_uris (max 4 concurrent)]
+          generate_gold_bundle  ──►  write_to_human_review_queue (Firestore)
+          generate_gold_bundle  ──►  write_to_human_review_queue
+          ...
+        [After all bundles done]
+          assemble_corpus  ──►  JSONL files in GCS
+```
+
+Each `generate_gold_bundle` step:
+- Downloads the task spec and KB chunks from GCS into `/tmp`
+- Runs the full `GoldGenerator` (EvidencePack → 3 teachers → Dean → Auditor → Bundle → Slices)
+- Uploads `GOLD-*.json` and `slices/` back to GCS
+- Fetches `OPENAI_API_KEY` from Secret Manager at runtime — key never appears in logs
+
+---
+
+### Vertex Pipeline DAG
+
+```
+ParallelFor(spec_gcs_uris, max_parallel=4)
+┌─────────────────────────────────────────────────┐
+│  generate_gold_bundle (spec_uri_0)              │
+│    download spec + KB from GCS                  │
+│    → EvidencePackBuilder (BM25, local)           │
+│    → PromptConstructor (deterministic)           │
+│    → Teacher A call  (OpenAI API)               │
+│    → Teacher B call  (OpenAI API)               │
+│    → Teacher C call  (OpenAI API)               │
+│    → Dean (citations + symbolic + LLM rubric)   │
+│    → Auditor (independent LLM review)           │
+│    → BundleAssembler + SliceEmitter             │
+│    upload GOLD-*.json + slices/ to GCS          │
+│    output: {"success": true, "bundle_id": "..."}│
+└──────────────────┬──────────────────────────────┘
+                   │
+                   ▼
+     write_to_human_review_queue
+       download bundle from GCS
+       write PENDING_REVIEW doc to Firestore
+
+[Loop repeats for each spec in parallel]
+[All loops complete]
+         │
+         ▼
+    assemble_corpus
+      download all GOLD-*.json from GCS
+      re-emit 8 slice types per bundle
+      dedup by content hash
+      write *.jsonl files to GCS corpus prefix
+```
+
+---
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| GCP project | Billing enabled |
+| `gcloud` CLI | Authenticated (`gcloud auth login`) |
+| Docker | Running locally for image build |
+| Python 3.11+ venv | With `kfp` + `google-cloud-aiplatform` installed |
+| GCS bucket | For pipeline root, specs, KB, gold bundles, corpus |
+| Artifact Registry repo | Docker type, to push the component image |
+| Secret Manager secret | Holds `OPENAI_API_KEY` |
+| Firestore database | For human review queue (native mode) |
+
+---
+
+### Step 1 — GCP Setup (IAM, APIs, Bucket, Secrets)
+
+Run the provided script once per project. Edit `PROJECT_ID` at the top first:
+
+```bash
+# Review and edit the project ID and bucket name, then:
+bash pipelines/vertex/setup_iam.sh
+```
+
+The script does:
+1. Enables: `aiplatform`, `storage`, `artifactregistry`, `secretmanager`, `firestore` APIs
+2. Creates a service account `brahmx-vertex-sa`
+3. Grants it the required roles (Vertex AI User, Storage Object Admin, Secret Accessor,
+   Firestore User, Artifact Registry Reader, Log Writer)
+4. Creates the GCS pipeline bucket
+5. Creates the Artifact Registry Docker repository
+
+**Create the OpenAI API key secret manually** (do this once):
+
+```bash
+export PROJECT_ID=your-project-id
+
+# Create the secret
+echo -n "sk-..." | gcloud secrets create openai-api-key \
+    --data-file=- \
+    --project=$PROJECT_ID
+
+# Grant the pipeline SA access to it
+gcloud secrets add-iam-policy-binding openai-api-key \
+    --member="serviceAccount:brahmx-vertex-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor" \
+    --project=$PROJECT_ID
+```
+
+**Create Firestore database** (one-time, native mode):
+
+```bash
+gcloud firestore databases create \
+    --location=nam5 \
+    --project=$PROJECT_ID
+```
+
+---
+
+### Step 2 — Build and Push the Component Image
+
+The Docker image pre-installs `brahmx_sdg` so every KFP component can import it without
+a per-component `packages_to_install` download at runtime.
+
+```bash
+# Set your project and preferred region
+export PROJECT_ID=your-project-id
+export LOCATION=us-central1           # must match Vertex AI location
+
+# Build and push (run from repo root — Dockerfile copies src/ and pyproject.toml)
+bash pipelines/vertex/build_and_push.sh
+
+# The script prints the image URI and saves it to pipelines/vertex/.image_uri.env
+# Source it so pipeline.py picks it up:
+source pipelines/vertex/.image_uri.env
+echo $BRAHMX_IMAGE_URI
+# → us-central1-docker.pkg.dev/your-project-id/brahmx/sdg:latest
+```
+
+To rebuild after code changes:
+
+```bash
+bash pipelines/vertex/build_and_push.sh v2    # tags as :v2
+```
+
+---
+
+### Step 3 — Upload Assets to GCS
+
+Task specs, KB chunks, and the routing config must be in GCS before the pipeline runs.
+
+```bash
+export PIPELINE_BUCKET=your-pipeline-bucket
+
+# Upload everything from local data/ and configs/ to GCS
+bash scripts/upload_to_gcs.sh
+```
+
+The script uploads:
+- `configs/specs/*.json`           → `gs://$PIPELINE_BUCKET/specs/`
+- `data/kb/chunks/*.json`          → `gs://$PIPELINE_BUCKET/kb/chunks/`
+- `configs/routing/models.yaml`    → `gs://$PIPELINE_BUCKET/configs/models.yaml`
+
+To add your own source documents and ingest them into the KB locally first:
+
+```bash
+# Ingest locally (creates data/kb/chunks/*.json)
+brahmx-sdg ingest run --source /path/to/docs/ --domain physics --kb-dir data/kb
+
+# Then re-upload KB
+gsutil -m cp data/kb/chunks/*.json gs://$PIPELINE_BUCKET/kb/chunks/
+```
+
+To add new task specs:
+
+```bash
+# Copy one of the example specs and edit it
+cp configs/specs/thermodynamics_first_law.json configs/specs/my_new_topic.json
+# ... edit it ...
+gsutil cp configs/specs/my_new_topic.json gs://$PIPELINE_BUCKET/specs/
+```
+
+---
+
+### Step 4 — Set Environment Variables
+
+Copy and fill in the environment file:
+
+```bash
+cp pipelines/vertex/.env.example pipelines/vertex/.env
+```
+
+Edit `pipelines/vertex/.env`:
+
+```bash
+# GCP project
+PROJECT_ID=your-project-id
+
+# Service account created by setup_iam.sh
+SA_NAME=brahmx-vertex-sa
+SA_EMAIL=brahmx-vertex-sa@your-project-id.iam.gserviceaccount.com
+
+# Vertex AI region — must match Artifact Registry location
+LOCATION=us-central1
+
+# GCS bucket (created by setup_iam.sh)
+PIPELINE_BUCKET=your-pipeline-bucket
+
+# Docker image URI (printed by build_and_push.sh)
+BRAHMX_IMAGE_URI=us-central1-docker.pkg.dev/your-project-id/brahmx/sdg:latest
+```
+
+Load it before running the pipeline:
+
+```bash
+source pipelines/vertex/.env
+# Or for a one-liner:
+export $(grep -v '^#' pipelines/vertex/.env | xargs)
+```
+
+---
+
+### Step 5 — Compile the Pipeline
+
+Compilation is a local Python step — it validates the DAG and produces a YAML spec that
+Vertex AI executes. No GCP calls are made.
+
+```bash
+# Activate the vertex venv first
+source .venv-vertex/bin/activate
+
+# Compile only (produces brahmx_sdg_pipeline.yaml in the current directory)
+python pipelines/vertex/pipeline.py --compile-only
+
+# Compile to a specific path
+python pipelines/vertex/pipeline.py --compile-only --output pipelines/vertex/brahmx_sdg_pipeline.yaml
+```
+
+Successful output:
+
+```
+Pipeline compiled → brahmx_sdg_pipeline.yaml
+```
+
+---
+
+### Step 6 — Submit to Vertex AI
+
+```bash
+# Compile and submit in one command
+python pipelines/vertex/pipeline.py
+
+# Submit without LLM Dean scoring (faster / cheaper for development runs)
+NO_LLM_DEAN=true python pipelines/vertex/pipeline.py
+
+# Disable step caching (forces all steps to re-run even if inputs haven't changed)
+python pipelines/vertex/pipeline.py --no-cache
+```
+
+The submit step:
+1. Calls `aiplatform.init(project=PROJECT_ID, location=LOCATION)`
+2. Creates a `PipelineJob` pointing at the compiled YAML in `gs://$PIPELINE_BUCKET/pipeline-root`
+3. Authenticates via Application Default Credentials — run `gcloud auth application-default login` first
+4. Submits and prints a console URL to monitor the run
+
+**Authenticate ADC before submitting:**
+
+```bash
+gcloud auth application-default login
+gcloud config set project $PROJECT_ID
+```
+
+**Outputs written to GCS after a successful run:**
+
+```
+gs://$PIPELINE_BUCKET/
+├── gold/
+│   ├── GOLD-<id>.json          # Gold Record Bundles
+│   └── slices/                 # Individual training slice JSONs
+└── corpus/
+    └── v0.1/
+        ├── explanation_generation.jsonl
+        ├── qa_with_citation.jsonl
+        ├── quiz_generation.jsonl
+        ├── term_extraction.jsonl
+        ├── misconception_correction.jsonl
+        ├── claim_verification.jsonl
+        ├── summary_generation.jsonl
+        ├── structured_outline.jsonl
+        └── all_slices.jsonl
+```
+
+Download the corpus locally:
+
+```bash
+gsutil -m rsync -r gs://$PIPELINE_BUCKET/corpus/v0.1/ data/corpus/v0.1/
+```
+
+---
+
+### Pipeline Parameters Reference
+
+All parameters can be overridden at submit time by editing `_default_parameter_values()` in
+[pipelines/vertex/pipeline.py](pipelines/vertex/pipeline.py) or passing them via the Vertex AI
+console when re-running a job.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `project_id` | `str` | `$PROJECT_ID` | GCP project ID |
+| `spec_gcs_uris` | `list[str]` | 3 example specs | `gs://` URIs of task spec JSON files to process |
+| `kb_gcs_prefix` | `str` | `gs://.../kb/` | GCS prefix where KB chunk JSON files live |
+| `gold_gcs_prefix` | `str` | `gs://.../gold/` | GCS prefix for gold bundle output |
+| `corpus_gcs_prefix` | `str` | `gs://.../corpus/v0.1/` | GCS prefix for JSONL corpus output |
+| `routing_config_gcs_uri` | `str` | `gs://.../configs/models.yaml` | GCS URI of the routing config |
+| `openai_secret_id` | `str` | `"openai-api-key"` | Secret Manager secret name holding the API key |
+| `no_llm_dean` | `bool` | `false` | Skip LLM rubric scoring in Dean (citation/symbolic checks still run) |
+| `corpus_version` | `str` | `"v0.1"` | Version tag embedded in the corpus assembly result |
+
+**Parallelism** is hardcoded to `4` concurrent `generate_gold_bundle` tasks. To change it,
+edit the `parallelism=4` argument in `dsl.ParallelFor` in [pipeline.py](pipelines/vertex/pipeline.py:116)
+and recompile. This must be a compile-time constant, not a runtime parameter.
+
+---
+
+### Monitoring
+
+After submitting, Vertex AI prints a console URL. You can also find the run at:
+
+```
+https://console.cloud.google.com/vertex-ai/pipelines/runs?project=YOUR_PROJECT_ID
+```
+
+Each step shows:
+- Logs (stdout from the component function)
+- Input/output parameter values
+- Execution time and machine type
+
+**Check gold bundles landed in GCS:**
+
+```bash
+gsutil ls gs://$PIPELINE_BUCKET/gold/GOLD-*.json
+gsutil ls gs://$PIPELINE_BUCKET/gold/slices/ | head -20
+```
+
+**Check the human review queue in Firestore:**
+
+```bash
+gcloud firestore documents list \
+    --collection-id=human_review_queue \
+    --project=$PROJECT_ID
+```
+
+**Check corpus JSONL:**
+
+```bash
+gsutil cat gs://$PIPELINE_BUCKET/corpus/v0.1/all_slices.jsonl | head -3 | python3 -m json.tool
+```
+
+---
+
+### Common Errors
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `TypeError: Artifacts must have both a schema_title and schema_version` | `from __future__ import annotations` in a KFP component or pipeline file | Remove that import — KFP v2 needs concrete types, not lazy string annotations |
+| `ParallelFor parallelism must be >= 0. Got: {{channel:...}}` | Pipeline parameter passed as `parallelism=` | Use a hardcoded `int` — e.g. `parallelism=4` |
+| `The pipeline parameter X is not found in the pipeline job input definitions` | `parameter_values` dict contains a key not in the pipeline function signature | Remove the stale key from `_default_parameter_values()` |
+| `OPENAI_API_KEY not set` (component log) | Secret Manager call failed or secret name is wrong | Verify `openai_secret_id` matches the Secret Manager secret name and the SA has `secretmanager.secretAccessor` role |
+| `google.api_core.exceptions.PermissionDenied` | Service account missing an IAM role | Re-run `setup_iam.sh` or grant the missing role manually |
+| `google.api_core.exceptions.NotFound: ... Bucket ... not found` | `PIPELINE_BUCKET` doesn't exist or wrong name | Create the bucket: `gsutil mb gs://$PIPELINE_BUCKET` |
+| Component image pull fails | Image not pushed or wrong `BRAHMX_IMAGE_URI` | Re-run `build_and_push.sh` and re-source `.image_uri.env` |
+| `No GOLD-*.json chunks found` in corpus assembly | Gold generation step failed silently | Check Vertex AI logs for `generate_gold_bundle` tasks; look for Dean gate failures |
 
 ---
 
